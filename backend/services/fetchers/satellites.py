@@ -1,10 +1,16 @@
-"""Satellite tracking — CelesTrak/TLE fetch, SGP4 propagation, intel classification."""
+"""Satellite tracking — CelesTrak/TLE fetch, SGP4 propagation, intel classification.
+
+CelesTrak Fair Use Policy (https://celestrak.org/NORAD/elements/):
+  - Do NOT request the same data more than once every 24 hours
+  - Use If-Modified-Since headers for conditional requests
+  - No parallel/concurrent connections — one request at a time
+  - Set a descriptive User-Agent
+"""
 import math
 import time
 import json
 import re
 import logging
-import concurrent.futures
 from pathlib import Path
 from datetime import datetime, timedelta
 from sgp4.api import Satrec, WGS72, jday
@@ -23,9 +29,13 @@ def _gmst(jd_ut1):
 
 
 # Satellite GP data cache
-_sat_gp_cache = {"data": None, "last_fetch": 0, "source": "none"}
+# CelesTrak fair use: fetch at most once per 24 hours (86400s).
+# SGP4 propagation runs every 60s using cached TLEs — positions stay live.
+_CELESTRAK_FETCH_INTERVAL = 86400  # 24 hours
+_sat_gp_cache = {"data": None, "last_fetch": 0, "source": "none", "last_modified": None}
 _sat_classified_cache = {"data": None, "gp_fetch_ts": 0}
 _SAT_CACHE_PATH = Path(__file__).parent.parent.parent / "data" / "sat_gp_cache.json"
+_SAT_CACHE_META_PATH = Path(__file__).parent.parent.parent / "data" / "sat_gp_cache_meta.json"
 
 def _load_sat_cache():
     """Load satellite GP data from local disk cache."""
@@ -38,6 +48,8 @@ def _load_sat_cache():
                     data = json.load(f)
                 if isinstance(data, list) and len(data) > 10:
                     logger.info(f"Satellites: Loaded {len(data)} records from disk cache ({age_hours:.1f}h old)")
+                    # Restore last_modified from metadata
+                    _load_cache_meta()
                     return data
             else:
                 logger.info(f"Satellites: Disk cache is {age_hours:.0f}h old, will try fresh fetch")
@@ -51,9 +63,28 @@ def _save_sat_cache(data):
         _SAT_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SAT_CACHE_PATH, "w") as f:
             json.dump(data, f)
+        _save_cache_meta()
         logger.info(f"Satellites: Saved {len(data)} records to disk cache")
     except Exception as e:
         logger.warning(f"Satellites: Failed to save disk cache: {e}")
+
+def _load_cache_meta():
+    """Load cache metadata (Last-Modified timestamp) from disk."""
+    try:
+        if _SAT_CACHE_META_PATH.exists():
+            with open(_SAT_CACHE_META_PATH, "r") as f:
+                meta = json.load(f)
+            _sat_gp_cache["last_modified"] = meta.get("last_modified")
+    except Exception:
+        pass
+
+def _save_cache_meta():
+    """Save cache metadata to disk."""
+    try:
+        with open(_SAT_CACHE_META_PATH, "w") as f:
+            json.dump({"last_modified": _sat_gp_cache.get("last_modified")}, f)
+    except Exception:
+        pass
 
 
 # Satellite intelligence classification database
@@ -143,13 +174,14 @@ def _fetch_satellites_from_tle_api():
         term = key.split()[0] if len(key.split()) > 1 and key.split()[0] in ("USA", "NROL") else key
         search_terms.add(term)
 
-    def _fetch_term(term):
-        results = []
+    all_results = []
+    seen_ids = set()
+    for term in search_terms:
         try:
             url = f"https://tle.ivanstanojevic.me/api/tle/?search={term}&page_size=100&format=json"
             response = fetch_with_curl(url, timeout=8)
             if response.status_code != 200:
-                return results
+                continue
             data = response.json()
             for member in data.get("member", []):
                 gp = _parse_tle_to_gp(
@@ -159,21 +191,13 @@ def _fetch_satellites_from_tle_api():
                     member.get("line2", ""),
                 )
                 if gp:
-                    results.append(gp)
+                    sat_id = gp.get("NORAD_CAT_ID")
+                    if sat_id not in seen_ids:
+                        seen_ids.add(sat_id)
+                        all_results.append(gp)
+            time.sleep(1)  # Polite delay between requests
         except Exception as e:
             logger.debug(f"TLE fallback search '{term}' failed: {e}")
-        return results
-
-    all_results = []
-    seen_ids = set()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        future_map = {executor.submit(_fetch_term, term): term for term in search_terms}
-        for future in concurrent.futures.as_completed(future_map):
-            for gp in future.result():
-                sat_id = gp.get("NORAD_CAT_ID")
-                if sat_id not in seen_ids:
-                    seen_ids.add(sat_id)
-                    all_results.append(gp)
 
     return all_results
 
@@ -182,22 +206,37 @@ def fetch_satellites():
     sats = []
     try:
         now_ts = time.time()
-        if _sat_gp_cache["data"] is None or (now_ts - _sat_gp_cache["last_fetch"]) > 1800:
+        if _sat_gp_cache["data"] is None or (now_ts - _sat_gp_cache["last_fetch"]) > _CELESTRAK_FETCH_INTERVAL:
             gp_urls = [
                 "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=json",
                 "https://celestrak.com/NORAD/elements/gp.php?GROUP=active&FORMAT=json",
             ]
+            # Build conditional request headers (CelesTrak fair use)
+            headers = {}
+            if _sat_gp_cache.get("last_modified"):
+                headers["If-Modified-Since"] = _sat_gp_cache["last_modified"]
+
             for url in gp_urls:
                 try:
-                    response = fetch_with_curl(url, timeout=5)
+                    response = fetch_with_curl(url, timeout=15, headers=headers)
+                    if response.status_code == 304:
+                        # Data unchanged — reset timer without re-downloading
+                        _sat_gp_cache["last_fetch"] = now_ts
+                        logger.info(f"Satellites: CelesTrak returned 304 Not Modified (data unchanged)")
+                        break
                     if response.status_code == 200:
                         gp_data = response.json()
                         if isinstance(gp_data, list) and len(gp_data) > 100:
                             _sat_gp_cache["data"] = gp_data
                             _sat_gp_cache["last_fetch"] = now_ts
                             _sat_gp_cache["source"] = "celestrak"
+                            # Store Last-Modified header for future conditional requests
+                            if hasattr(response, 'headers'):
+                                lm = response.headers.get("Last-Modified")
+                                if lm:
+                                    _sat_gp_cache["last_modified"] = lm
                             _save_sat_cache(gp_data)
-                            logger.info(f"Satellites: Downloaded {len(gp_data)} GP records from {url}")
+                            logger.info(f"Satellites: Downloaded {len(gp_data)} GP records from CelesTrak")
                             break
                 except Exception as e:
                     logger.warning(f"Satellites: Failed to fetch from {url}: {e}")
@@ -220,7 +259,7 @@ def fetch_satellites():
                 disk_data = _load_sat_cache()
                 if disk_data:
                     _sat_gp_cache["data"] = disk_data
-                    _sat_gp_cache["last_fetch"] = now_ts - 1500
+                    _sat_gp_cache["last_fetch"] = now_ts - (_CELESTRAK_FETCH_INTERVAL - 300)
                     _sat_gp_cache["source"] = "disk_cache"
 
         data = _sat_gp_cache["data"]
