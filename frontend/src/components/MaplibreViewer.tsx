@@ -1890,6 +1890,7 @@ const MaplibreViewer = ({ data, activeLayers, onEntityClick, flyToLocation, sele
                     if (!base) return null;
                     const branchLabel: Record<string, string> = {
                         air_force: 'AIR FORCE', navy: 'NAVY', marines: 'MARINES', army: 'ARMY',
+                        gsdf: 'GSDF (陸自)', msdf: 'MSDF (海自)', asdf: 'ASDF (空自)',
                         missile: 'MISSILE FORCES', nuclear: 'NUCLEAR FACILITY',
                     };
                     const isAdversary = ['China', 'Russia', 'North Korea'].includes(base.country);
