@@ -4,7 +4,7 @@ import { ThemeProvider } from '@/lib/ThemeContext';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'WORLDVIEW // ORBITAL TRACKING',
+  title: 'GEOSENTINEL',
   description: 'Advanced Geopolitical Risk Dashboard',
 };
 
