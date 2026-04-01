@@ -34,7 +34,7 @@ services:
 
   frontend:
     image: ghcr.io/fadlisaad/geo-sentinel-frontend:latest
-    platform: linux/arm64
+    platform: linux/amd64
     container_name: shadowbroker-frontend
     ports:
       - "${BIND:-127.0.0.1}:3000:3000"
