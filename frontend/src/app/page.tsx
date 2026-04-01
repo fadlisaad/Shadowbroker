@@ -292,6 +292,10 @@ function LocateBar({ onLocate, onOpenChange }: { onLocate: (lat: number, lng: nu
   );
 }
 
+const titleOne = process.env.NEXT_PUBLIC_TITLE_ONE || 'G E O';
+const titleTwo = process.env.NEXT_PUBLIC_TITLE_TWO || 'S E N T I N E L';
+const titleThree = process.env.NEXT_PUBLIC_TITLE_THREE || 'GLOBAL THREAT INTELLIGENCE';
+
 export default function Dashboard() {
   const viewBoundsRef = useRef<{ south: number; west: number; north: number; east: number } | null>(null);
   const { mouseCoords, locationLabel, handleMouseCoords } = useReverseGeocode();
